@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -10,6 +11,9 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
 BASE = Path(__file__).parent / "index"
 
 
@@ -26,15 +30,13 @@ class SearchResult(BaseModel):
 async def startup(app: FastAPI):
     global manifest, index, model, duck_con
 
-    print("Loading manifest")
-    # Load manifest & FAISS
+    logging.info("Loading manifest")
     manifest = json.loads((BASE / "manifest.json").read_text())
 
-    print("Loading FAISS")
+    logging.info("Loading FAISS")
     index = faiss.read_index(str(manifest["faiss_index"]))
 
-    # Load embedder
-    print("Loading embedder")
+    logging.info("Loading embedder")
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
     duck_con = duckdb.connect()
@@ -42,7 +44,7 @@ async def startup(app: FastAPI):
     # duck_con.execute("SET s3_region='...'; SET s3_access_key_id='...'; ...")
 
     # Load each shard to read the footer, so we know its schema and row stats
-    print("Registering shards")
+    logging.info("Registering available shards")
     shard_glob = str(BASE / "shards" / "*.parquet")
     duck_con.execute(f"""
       CREATE VIEW shards AS
@@ -56,17 +58,21 @@ app = FastAPI(lifespan=startup)
 
 
 @app.get("/v0/search", response_model=list[SearchResult])
-def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
-    print("Performing search")
+def search(q: str = Query(...), k: int = Query(10, ge=1, le=100)):
+    logging.info("Performing search")
     start_time = time.perf_counter()
 
+    logging.debug("Embedding query")
     q_vec = model.encode([q], convert_to_numpy=True)
+
+    logging.debug(f"Searching index for k={k}")
     distances, indices = index.search(q_vec, k)
     vec_ids = [int(i) for i in indices[0] if i >= 0]
 
     if not vec_ids:
         raise HTTPException(404, "No results")
 
+    logging.debug("Searching shards for documents")
     sql = f"""
       SELECT vector_id, doc_id, chunk_id, source, text
       FROM shards
@@ -78,6 +84,8 @@ def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
 
     search_time = (end_time - start_time) * 1000
     search_time = f"{search_time:.2f}"
+
+    logging.info(f"Search finished in {search_time}ms")
 
     id_to_score = dict(zip(vec_ids, distances[0]))
     results = []
