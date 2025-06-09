@@ -1,16 +1,15 @@
 import base64
 import json
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import duckdb
 import faiss
-import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
-app = FastAPI()
 BASE = Path(__file__).parent / "index"
 
 
@@ -23,8 +22,8 @@ class SearchResult(BaseModel):
     time_ms: float
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def startup(app: FastAPI):
     global manifest, index, model, duck_con
 
     print("Loading manifest")
@@ -50,9 +49,13 @@ def startup():
         SELECT vector_id, doc_id, chunk_id, source, text
         FROM read_parquet('{shard_glob}');
     """)
+    yield
 
 
-@app.get("/search", response_model=list[SearchResult])
+app = FastAPI(lifespan=startup)
+
+
+@app.get("/v0/search", response_model=list[SearchResult])
 def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
     print("Performing search")
     start_time = time.perf_counter()
