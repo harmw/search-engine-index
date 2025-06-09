@@ -1,16 +1,18 @@
 import base64
 import json
 import time
-import faiss
-import duckdb
-import uvicorn
 from pathlib import Path
-from fastapi import FastAPI, Query, HTTPException
+
+import duckdb
+import faiss
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
 
 app = FastAPI()
 BASE = Path(__file__).parent / "index"
+
 
 class SearchResult(BaseModel):
     doc_id: int
@@ -19,6 +21,7 @@ class SearchResult(BaseModel):
     text: str
     score: float
     time_ms: float
+
 
 @app.on_event("startup")
 def startup():
@@ -35,20 +38,19 @@ def startup():
     print("Loading embedder")
     model = SentenceTransformer("all-MiniLM-L6-v2")
 
-    # Initialize DuckDB with S3/httpfs support if needed
     duck_con = duckdb.connect()
-    # If your files are remote, enable HTTPFS and configure credentials:
     # duck_con.execute("INSTALL httpfs; LOAD httpfs;")
-    # duck_con.execute("SET s3_region='…'; SET s3_access_key_id='…'; …")
+    # duck_con.execute("SET s3_region='...'; SET s3_access_key_id='...'; ...")
 
+    # Load each shard to read the footer, so we know its schema and row stats
     print("Registering shards")
-    # Register the shards as a single table via glob
     shard_glob = str(BASE / "shards" / "*.parquet")
     duck_con.execute(f"""
       CREATE VIEW shards AS
         SELECT vector_id, doc_id, chunk_id, source, text
         FROM read_parquet('{shard_glob}');
     """)
+
 
 @app.get("/search", response_model=list[SearchResult])
 def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
@@ -65,7 +67,7 @@ def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
     sql = f"""
       SELECT vector_id, doc_id, chunk_id, source, text
       FROM shards
-      WHERE vector_id IN ({','.join(map(str, vec_ids))})
+      WHERE vector_id IN ({",".join(map(str, vec_ids))})
     """
     df = duck_con.execute(sql).fetch_df()
 
@@ -83,18 +85,16 @@ def search(q: str = Query(...), k: int = Query(5, ge=1, le=100)):
         url_part = str(source.split("/")[-1:]).replace(".md", "")
         url = base64.urlsafe_b64decode(url_part)
 
-        results.append(SearchResult(
-            doc_id   = int(row.doc_id),
-            chunk_id = int(row.chunk_id),
-            #source   = row.source,
-            url      = url,
-            text     = row.text[:100],
-            score    = float(id_to_score[vid]),
-            time_ms  = search_time,
-        ))
+        results.append(
+            SearchResult(
+                doc_id=int(row.doc_id),
+                chunk_id=int(row.chunk_id),
+                # source   = row.source,
+                url=url,
+                text=row.text[:100],
+                score=float(id_to_score[vid]),
+                time_ms=search_time,
+            )
+        )
 
     return results
-
-if __name__ == "__main__":
-    uvicorn.run("app_with_duckdb:app", host="0.0.0.0", port=8000, reload=True)
-
