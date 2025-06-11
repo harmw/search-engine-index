@@ -19,6 +19,11 @@ logging.basicConfig(
 BASE = Path(__file__).parent / "index"
 
 
+class DomainCount(BaseModel):
+    domain: str
+    pages_count: int
+
+
 class SearchResult(BaseModel):
     doc_id: int
     chunk_id: int
@@ -33,9 +38,20 @@ class APIResponse(BaseModel):
     search_time_ms: str
 
 
+class Stats(BaseModel):
+    total_pages: int
+    total_websites: int
+    vector_size: int
+    embedding_size: int
+
+
 @asynccontextmanager
 async def startup(app: FastAPI):
-    global manifest, index, model, duck_con
+    global manifest, index, model, duck_con, metadata_duck
+
+    # TODO: we need a separate process to merge all scraper_data files, coming from each scraper
+    logging.info("Loading metadata")
+    metadata_duck = duckdb.connect("scraper_data.db", read_only=True)
 
     logging.info("Loading manifest")
     manifest = json.loads((BASE / "manifest.json").read_text())
@@ -62,6 +78,36 @@ async def startup(app: FastAPI):
 
 
 app = FastAPI(lifespan=startup)
+
+
+@app.get("/v0/stats/info", response_model=Stats)
+def stats_info():
+    total_pages = metadata_duck.execute(
+        "select count(distinct url) from scraped_urls"
+    ).fetchone()
+    total_websites = metadata_duck.execute(
+        "select count(distinct domain) from scraped_urls"
+    ).fetchone()
+
+    return Stats(
+        total_pages=total_pages[0],
+        total_websites=total_websites[0],
+        vector_size=index.ntotal,
+        embedding_size=index.d,
+    )
+
+
+@app.get("/v0/stats/pages_per_domain", response_model=List[DomainCount])
+def pages_per_domain():
+    df = metadata_duck.execute(f"""
+        select domain, count(*) as pages_count
+        from scraped_urls
+        group by domain
+        order by pages_count desc
+    """).fetchdf()
+    return [
+        {"domain": row[0], "pages_count": row[1]} for row in df.itertuples(index=False)
+    ]
 
 
 @app.get("/v0/search", response_model=APIResponse)
@@ -104,7 +150,9 @@ def search(q: str = Query(...), k: int = Query(10, ge=1, le=100)):
         url = base64.urlsafe_b64decode(url_part)
 
         # Strip any markdown header from a text
-        clean_text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", row.text, flags=re.DOTALL)[:400]
+        clean_text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", row.text, flags=re.DOTALL)[
+            :400
+        ]
 
         try:
             # TODO: we should capture the title at scraping, this is just silly
