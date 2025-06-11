@@ -4,6 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import List
 
 import duckdb
 import faiss
@@ -23,7 +24,10 @@ class SearchResult(BaseModel):
     url: str
     text: str
     score: float
-    time_ms: float
+
+class APIResponse(BaseModel):
+    results: List[SearchResult]
+    search_time_ms: str
 
 
 @asynccontextmanager
@@ -57,9 +61,9 @@ async def startup(app: FastAPI):
 app = FastAPI(lifespan=startup)
 
 
-@app.get("/v0/search", response_model=list[SearchResult])
+@app.get("/v0/search", response_model=APIResponse)
 def search(q: str = Query(...), k: int = Query(10, ge=1, le=100)):
-    logging.info("Performing search")
+    logging.info(f"Performing search for {q}")
     start_time = time.perf_counter()
 
     logging.debug("Embedding query")
@@ -104,8 +108,7 @@ def search(q: str = Query(...), k: int = Query(10, ge=1, le=100)):
                 url=url,
                 text=row.text[:100],
                 score=float(id_to_score[vid]),
-                time_ms=search_time,
             )
         )
 
-    return results
+    return APIResponse(results=results, search_time_ms=search_time)
