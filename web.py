@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,7 +24,9 @@ class SearchResult(BaseModel):
     chunk_id: int
     url: str
     text: str
+    title: str
     score: float
+
 
 class APIResponse(BaseModel):
     results: List[SearchResult]
@@ -100,13 +103,26 @@ def search(q: str = Query(...), k: int = Query(10, ge=1, le=100)):
         url_part = str(source.split("/")[-1:]).replace(".md", "")
         url = base64.urlsafe_b64decode(url_part)
 
+        # Strip any markdown header from a text
+        clean_text = re.sub(r"^---\s*\n.*?\n---\s*\n", "", row.text, flags=re.DOTALL)[:400]
+
+        try:
+            # TODO: we should capture the title at scraping, this is just silly
+            title = row.text.split("\n")[1]
+        except Exception as e:
+            # this happens when we're dealing with a non-first chunk of a markdown doc
+            logging.warning(e)
+            print(row.text[:150])
+            title = ""
+
         results.append(
             SearchResult(
                 doc_id=int(row.doc_id),
                 chunk_id=int(row.chunk_id),
                 # source   = row.source,
                 url=url,
-                text=row.text[:100],
+                text=clean_text,
+                title=title,
                 score=float(id_to_score[vid]),
             )
         )
